@@ -6,39 +6,41 @@ The application follows a modular Python architecture. Each module handles a spe
 
 Streamlit acts as the user interface and connects the news collection, filtering, ranking, source verification and article generation modules.
 
+The system combines automated news discovery and ranking with manually reviewed industry information to generate business-oriented LinkedIn articles.
+
 ## 2. System Architecture Diagram
 
 ```text
-                 USER
-                   |
-                   v
-          STREAMLIT DASHBOARD
-                app.py
-                   |
-        +----------+-----------+
-        |          |           |
-        v          v           v
-  NEWS DISCOVERY  SELECTED    ARTICLE
-                  DEVELOPMENT GENERATION
-        |          |            |
-        v          v            v
- NEWS COLLECTOR  SOURCE      STYLE GUIDE
-        |       VERIFIER         |
-        v          |             v
-  GOOGLE NEWS      v          PROMPT CREATION
-     RSS        VERIFIED         |
-        |        FACTS           v
-        v                     GEMINI API
-  NEWS FILTERING                 |
-        |                        v
-        v                    ARTICLE DRAFT
-   NEWS RANKER
-        |
-        v
-  RANKED NEWS RESULTS
-        |
-        v
-  STREAMLIT DASHBOARD
+                       USER
+                         |
+                         v
+                STREAMLIT DASHBOARD
+                      app.py
+                         |
+             +-----------+-----------+
+             |           |           |
+             v           v           v
+        NEWS DISCOVERY  SELECTED    ARTICLE
+                       DEVELOPMENT GENERATION
+             |           |           |
+             v           v           v
+       NEWS COLLECTOR  SOURCE     STYLE GUIDE
+             |        VERIFIER        |
+             v           |            v
+       GOOGLE NEWS       v         PROMPT
+          RSS         VERIFIED    CREATION
+             |          FACTS         |
+             v                        v
+       NEWS FILTERING              GEMINI API
+             |                        |
+             v                        v
+        NEWS RANKER               ARTICLE DRAFT
+             |
+             v
+       RANKED NEWS RESULTS
+             |
+             v
+       STREAMLIT DASHBOARD
 ```
 
 ## 3. Module Responsibilities
@@ -48,9 +50,10 @@ Streamlit acts as the user interface and connects the news collection, filtering
 - Provides the Streamlit dashboard.
 - Triggers news collection and processing.
 - Displays article counts and ranking results.
-- Presents the selected industry development.
+- Shows the highest-ranked news articles with their scores and selection reasons.
+- Presents the selected industry development and supporting references.
 - Triggers LinkedIn article generation.
-- Displays the generated article and references.
+- Displays the generated article and its references.
 
 ### B. news_collector.py – News Collection
 
@@ -68,24 +71,31 @@ Streamlit acts as the user interface and connects the news collection, filtering
 
 ### D. news_ranker.py – News Ranking
 
-Ranks the filtered news using four criteria:
+Ranks filtered news using a custom rule-based scoring algorithm. Each article receives points based on its industry relevance, importance of the development, potential business impact and recency.
 
 | Criterion | Maximum Points |
 |---|---:|
-| Relevance | 35 |
-| Impact | 30 |
-| Recency | 20 |
-| Business Opportunity | 15 |
-| **Total** | **100** |
+| Business Relevance | 30 |
+| Industry Development | 35 |
+| Business / Supply Chain Impact | 20 |
+| Recency | 15 |
+| **Base Score** | **100** |
 
-The module also uses headline similarity to remove near-duplicate articles.
+The ranking system also:
+
+- Adds a specificity bonus of up to 5 points.
+- Applies penalties to less relevant content, such as generic reports, stock-related news and awards.
+- Provides selection reasons to explain why an article received its ranking.
+- Uses headline similarity to identify and remove near-duplicate articles.
+
+The final ranking is based on predefined keywords and scoring rules rather than a machine-learning model.
 
 ### E. source_verifier.py – Source Verification
 
 - Maintains the selected news development.
 - Stores manually reviewed factual information.
 - Maintains supporting source names and links.
-- Returns the facts and references required for article generation.
+- Provides verified facts and references required for article generation.
 
 ### F. style_guide.py – Writing Style
 
@@ -101,7 +111,7 @@ Defines the ChemStride LinkedIn writing guidelines, including:
 ### G. article_generator.py – AI Article Generation
 
 - Creates the article-generation prompt.
-- Combines the selected news details, verified facts and writing guidelines.
+- Combines selected news details, verified facts and writing guidelines.
 - Sends the prompt to the Gemini API.
 - Receives and returns the generated article.
 - Provides a basic fallback draft if AI generation fails.
@@ -118,23 +128,23 @@ Collected articles are checked for recency and relevance using predefined keywor
 
 **Step 3: Ranking**
 
-Relevant articles are scored and sorted based on their business relevance, impact, recency and opportunity.
+Relevant articles are scored using the custom ranking algorithm. The system considers business relevance, industry development, business impact and recency, with additional bonuses and penalties where applicable.
 
 **Step 4: Editorial Selection**
 
-A suitable chemical industry development is selected for further analysis.
+The application displays the highest-ranked news articles with their scores and selection reasons. A selected chemical industry development is maintained separately for detailed analysis.
 
 **Step 5: Source Verification**
 
-Important facts and supporting references are maintained in the source verification module.
+The source verification module provides manually reviewed facts and supporting references for the selected Kutch Chemical development.
 
 **Step 6: Article Generation**
 
-The article generator combines verified facts with ChemStride's writing guidelines and sends the prompt to Gemini.
+The article generator combines the selected development, verified facts and ChemStride writing guidelines to create a prompt for the Gemini API.
 
 **Step 7: Output Display**
 
-The generated LinkedIn article and source references are displayed in the Streamlit dashboard.
+The generated LinkedIn article, selected news information and supporting source references are displayed in the Streamlit dashboard.
 
 ## 5. Technology Stack
 
@@ -146,7 +156,7 @@ The generated LinkedIn article and source references are displayed in the Stream
 | RSS Processing | Feedparser |
 | News Filtering | Python keyword-based rules |
 | Ranking | Custom Python scoring algorithm |
-| Duplicate Detection | SequenceMatcher |
+| Duplicate Detection | SequenceMatcher and link-based checks |
 | AI Article Generation | Google Gemini API |
 | Environment Configuration | python-dotenv |
 
@@ -159,6 +169,8 @@ The application includes basic error handling for:
 - Gemini API errors.
 - Empty AI responses.
 - API availability and timeout issues.
+
+The article generator also includes retry handling for temporary API failures.
 
 When Gemini is unavailable, the article generator returns a basic fallback draft using the supplied facts.
 
@@ -186,4 +198,4 @@ The system can be extended with:
 
 The modular architecture separates news discovery, processing, ranking, verification and content generation.
 
-This structure makes it possible to improve individual components without redesigning the entire application.
+This structure makes it possible to improve individual components without redesigning the entire application. By combining automated news processing with manually reviewed information and AI-assisted writing, the system provides a structured approach to identifying relevant chemical industry developments and preparing business-oriented content.
