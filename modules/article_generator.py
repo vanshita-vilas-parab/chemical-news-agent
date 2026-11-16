@@ -11,184 +11,311 @@ from modules.style_guide import get_style_guide
 load_dotenv()
 
 
-def create_prompt(news, verified_facts):
-    """Prepare instructions and verified information for Gemini."""
+# --------------------------------------------------
+# 1. PREPARE ARTICLE PROMPT
+# --------------------------------------------------
+
+def create_prompt(
+    news,
+    extracted_facts,
+    business_implications=None,
+    editorial_analysis=None
+):
+    """Create a factual ChemStride LinkedIn article prompt."""
 
     style = get_style_guide()
 
     facts_text = "\n".join(
-        f"- {fact}" for fact in verified_facts
+        f"- {fact}"
+        for fact in extracted_facts
     )
 
+    implications_text = "\n".join(
+        f"- {item}"
+        for item in (business_implications or [])
+    ) or "No direct implications were established by the source."
+
+    analysis_text = "\n".join(
+        f"- {item}"
+        for item in (editorial_analysis or [])
+    ) or "No additional editorial analysis is available."
+
     prompt = f"""
-You are writing a LinkedIn industry article for ChemStride.
+You are writing a professional LinkedIn industry article
+for ChemStride.
+
+Follow these writing guidelines:
 
 {style}
 
-NEWS DEVELOPMENT:
+SELECTED NEWS:
+
 Headline: {news.get('title', 'Not provided')}
 Publisher: {news.get('source', 'Not provided')}
 Published: {news.get('published', 'Not provided')}
+Original article: {news.get('original_url') or news.get('link') or news.get('url', 'Not provided')}
 
-VERIFIED FACTS:
+FACTS EXTRACTED FROM THE ARTICLE:
+
 {facts_text}
 
-ARTICLE REQUIREMENTS:
-- Write approximately 300-450 words.
-- Start with an engaging, informative headline.
-- Use a natural and professional introduction.
-- Explain the development using the verified facts.
-- Use clear section headings and short paragraphs.
-- Explain its possible business and supply-chain implications.
-- Clearly distinguish possible benefits from confirmed outcomes.
-- Do not invent statistics, quotations or market predictions.
-- Include a meaningful industry takeaway.
-- End with a relevant call to action.
-- Add 4-6 relevant hashtags.
-- Avoid generic introductions and repetitive sentences.
-- Return only the complete LinkedIn article.
+BUSINESS IMPLICATIONS SUPPORTED BY THE ARTICLE:
 
-ADDITIONAL CONTENT RULES:
-- Avoid unsupported general claims about rising domestic demand or industry growth.
-- Do not describe commissioning as the start of commercial production or operations unless explicitly confirmed by the verified facts.
-- Explain that Kutch Chemical will use caustic soda and chlorine for its own production and sales in the Indian market.
-- Do not assume that only surplus production will be sold.
-- Keep the industry takeaway directly connected to the confirmed plant commissioning, production capacity and technology.
-- Do not introduce unsupported statistics, quotations, market trends or company statements.
-- Any general industry context must be clearly distinguished from facts about this specific development.
-- Do not turn planned activities into completed achievements.
+{implications_text}
+
+EDITORIAL ANALYSIS:
+
+{analysis_text}
+
+ARTICLE REQUIREMENTS:
+
+1. Write approximately 300-400 words.
+2. Start with a strong, informative headline.
+3. Introduce the actual development clearly.
+4. Explain the reported facts accurately.
+5. Use short paragraphs and meaningful headings.
+6. Discuss business implications only when supported.
+7. If you add broader interpretation, clearly label it as analysis.
+8. Include a practical chemical-industry takeaway.
+9. End with a relevant question or call to action.
+10. Add 4-6 relevant hashtags.
+11. Use simple, natural and professional English.
+12. Follow ChemStride's writing style.
+13. Avoid unnecessary repetition and generic statements.
+
+STRICT FACTUAL RULES:
+
+- Use only the supplied facts for specific claims.
+- Never invent statistics, dates, company statements or quotations.
+- Never introduce facts from unrelated developments.
+- Do not convert proposals or plans into completed activities.
+- Do not present possible market effects as confirmed outcomes.
+- Do not invent customer demand, production volumes or financial effects.
+- Do not claim that information has been independently verified.
+- Do not create unsupported connections to other industries.
+- If information is unavailable, leave it out.
+- Do not repeat the same fact merely to increase article length.
+
+Return only the complete LinkedIn article.
 """
 
     return prompt
 
 
-def generate_article(news, verified_facts, use_ai=True):
+# --------------------------------------------------
+# 2. FACTUAL FALLBACK ARTICLE
+# --------------------------------------------------
+
+def generate_fallback_article(
+    news,
+    extracted_facts,
+    business_implications=None,
+    editorial_analysis=None
+):
     """
-    Generate a LinkedIn article using Gemini.
-    Use a factual fallback draft if the API is unavailable.
+    Generate a basic article without adding unsupported facts.
+    """
+
+    title = news.get(
+        "title",
+        "Chemical Industry Update"
+    )
+
+    facts_text = "\n".join(
+        f"- {fact}"
+        for fact in extracted_facts
+    )
+
+    implications = business_implications or []
+    analysis = editorial_analysis or []
+
+    sections = [
+        f"# {title}",
+        "",
+        "## Understanding the Development",
+        "",
+        "The selected article reports the following details:",
+        "",
+        facts_text
+    ]
+
+    if implications:
+
+        sections.extend([
+            "",
+            "## Business Relevance",
+            "",
+            "The source identifies the following business implications:",
+            ""
+        ])
+
+        sections.extend(
+            f"- {item}" for item in implications
+        )
+
+    if analysis:
+
+        sections.extend([
+            "",
+            "## Industry Perspective",
+            "",
+            "The following points are editorial analysis, "
+            "not additional confirmed facts:",
+            ""
+        ])
+
+        sections.extend(
+            f"- {item}" for item in analysis
+        )
+
+    sections.extend([
+        "",
+        "## Industry Takeaway",
+        "",
+        "Industry participants can follow this development "
+        "and assess its relevance using further company, "
+        "market and operational information.",
+        "",
+        "What could this development mean for businesses "
+        "across the chemical industry?",
+        "",
+        "#ChemicalIndustry #ChemicalManufacturing "
+        "#IndustryInsights #ChemStride"
+    ])
+
+    return "\n".join(sections)
+
+
+# --------------------------------------------------
+# 3. GENERATE LINKEDIN ARTICLE
+# --------------------------------------------------
+
+def generate_article(
+    news,
+    verified_facts,
+    use_ai=True,
+    business_implications=None,
+    editorial_analysis=None
+):
+    """
+    Generate a ChemStride LinkedIn article.
+
+    AI generation is optional. The fallback uses only
+    the extracted facts and supplied analysis.
     """
 
     if not verified_facts:
-        return "Please provide verified facts before generating the article."
+        return (
+            "No extracted facts are available. "
+            "Article generation has been stopped."
+        )
 
-    # Try Gemini when AI generation is enabled
+    if not use_ai:
+
+        return generate_fallback_article(
+            news,
+            verified_facts,
+            business_implications,
+            editorial_analysis
+        )
+
     api_key = os.getenv("GEMINI_API_KEY")
 
-    if use_ai and api_key:
+    if not api_key:
 
-        try:
-            client = genai.Client(
-                api_key=api_key,
-                http_options=types.HttpOptions(
-                    retry_options=types.HttpRetryOptions(
-                        attempts=1
-                    )
+        print(
+            "Gemini API key not found. "
+            "Using factual fallback article."
+        )
+
+        return generate_fallback_article(
+            news,
+            verified_facts,
+            business_implications,
+            editorial_analysis
+        )
+
+    try:
+
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(
+                retry_options=types.HttpRetryOptions(
+                    attempts=1
                 )
             )
+        )
 
-            prompt = create_prompt(news, verified_facts)
+        prompt = create_prompt(
+            news,
+            verified_facts,
+            business_implications,
+            editorial_analysis
+        )
 
-            print("\nSending article request to Gemini...")
-            start_time = time.perf_counter()
+        print("\nSending article request to Gemini...")
 
-            response = client.models.generate_content(
-                model=os.getenv(
-                    "GEMINI_MODEL",
-                    "gemini-3.8-flash"
-                ),
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.4,
-                    max_output_tokens=2000,
-                )
+        start_time = time.perf_counter()
+
+        response = client.models.generate_content(
+            model=os.getenv(
+                "GEMINI_MODEL",
+                "gemini-3.8-flash"
+            ),
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=1800
             )
+        )
 
-            generation_time = time.perf_counter() - start_time
+        generation_time = (
+            time.perf_counter() - start_time
+        )
 
-            print(
-                f"Gemini generation time: "
-                f"{generation_time:.2f} seconds"
-            )
+        print(
+            f"Article generation time: "
+            f"{generation_time:.2f} seconds"
+        )
 
-            finish_reason = None
+        if response.text and response.text.strip():
+            return response.text.strip()
 
-            if response.candidates:
-                finish_reason = response.candidates[0].finish_reason
-                print("Gemini finish reason:", finish_reason)
+        print("Gemini returned an empty response.")
 
-            if response.text:
-                if "MAX_TOKENS" in str(finish_reason):
-                    print("Warning: Article may be incomplete.")
+    except Exception as error:
 
-                return response.text.strip()
+        print(
+            "Gemini article generation failed:",
+            repr(error)
+        )
 
-            print("Gemini returned an empty response.")
+    print("Using factual fallback article.")
 
-        except Exception as error:
-            print("Gemini generation failed:", repr(error))
-            print("Using basic fallback draft.")
-
-    elif use_ai and not api_key:
-        print("Gemini API key not found. Using fallback draft.")
-
-    # Fallback article: uses only the supplied information
-    facts = "\n".join(
-        f"- {fact}" for fact in verified_facts
+    return generate_fallback_article(
+        news,
+        verified_facts,
+        business_implications,
+        editorial_analysis
     )
 
-    return f"""
-# {news.get('title', 'Chemical Industry Update')}
 
-A new development in India's chemical manufacturing
-sector highlights the importance of domestic production
-capacity and modern manufacturing technology.
-
-## A New Manufacturing Facility in Gujarat
-
-{facts}
-
-## Industry Significance
-
-The commissioning of this facility adds to India's
-caustic soda production capacity.
-
-The use of modern electrolyzer technology is an
-important part of this manufacturing development.
-Kutch Chemical's planned use of caustic soda and
-chlorine for its own production and sales in India
-also highlights the role of integrated manufacturing.
-
-For industry participants, developments like this
-are worth monitoring when assessing domestic
-production capacity and sourcing opportunities.
-
-## Industry Takeaway
-
-The commissioning of the plant represents a
-significant addition to India's chemical manufacturing
-infrastructure. Its longer-term impact on supply,
-pricing and market availability will depend on
-operational performance and market conditions.
-
-#ChemicalIndustry #ChemicalManufacturing
-#ChlorAlkali #SupplyChain #ChemStride
-"""
-
+# --------------------------------------------------
+# 4. LOCAL TEST
+# --------------------------------------------------
 
 if __name__ == "__main__":
 
     sample_news = {
-        "title": "Kutch Chemical commissions a major caustic soda plant",
-        "source": "thyssenkrupp nucera",
-        "published": "5 November 2026"
+        "title": "Example chemical industry development",
+        "source": "Example Publisher",
+        "published": "Example publication date",
+        "link": ""
     }
 
     sample_facts = [
-        "The plant has an annual caustic soda capacity of 220,000 metric tonnes.",
-        "The facility is located in Padana, Gujarat.",
-        "The plant was commissioned on 5 November 2026.",
-        "The facility uses five electrolyzers based on BM Generation 6+ technology.",
-        "Kutch Chemical plans to use caustic soda and chlorine for its own production and sales in India."
+        "Example company announced a manufacturing development.",
+        "The article reports the location of the facility."
     ]
 
     article = generate_article(
