@@ -1,7 +1,10 @@
-
 import streamlit as st
 import streamlit.components.v1 as components
-import html
+
+try:
+    import fitz  # PyMuPDF: renders each PDF page as an image for reliable preview
+except ImportError:
+    fitz = None
 
 from modules.news_collector import collect_news
 from modules.news_filter import filter_news
@@ -18,9 +21,7 @@ from modules.article_generator import generate_article
 from modules.carousel_generator import generate_carousel
 
 
-# ==================================================
 # PAGE CONFIGURATION
-# ==================================================
 
 st.set_page_config(
     page_title="ChemStride News Agent",
@@ -32,73 +33,13 @@ st.title("🧪 ChemStride – Chemical Industry News Agent")
 
 st.write(
     "An AI-powered tool to discover chemical industry developments, "
-    "evaluate important news, and generate LinkedIn articles and carousels."
+    "select important news, and generate LinkedIn articles and carousels."
 )
 
 st.divider()
 
 
-# ==================================================
-# SESSION STATE HELPERS
-# ==================================================
-
-def clear_generated_content():
-    keys = [
-        "selected_news",
-        "verified_data",
-        "candidate_evaluations",
-        "generated_article",
-        "generated_carousel",
-        "carousel_index"
-    ]
-
-    for key in keys:
-        st.session_state.pop(key, None)
-
-
-def get_score(news):
-    try:
-        return float(news.get("score", 0))
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def get_news_url(news):
-    return (
-        news.get("original_url")
-        or news.get("link")
-        or news.get("url")
-        or ""
-    )
-
-
-def show_sources(sources):
-    if not sources:
-        st.caption("No source references were returned.")
-        return
-
-    for source in sources:
-        name = (
-            source.get("name")
-            or source.get("publisher")
-            or "Original source"
-        )
-
-        url = source.get("url") or source.get("link") or ""
-
-        if url.startswith(("http://", "https://")):
-            st.markdown(f"- [{name}]({url})")
-        else:
-            st.write(f"- {name}")
-
-
-def safe_html(value):
-    return html.escape(str(value or ""))
-
-
-# ==================================================
 # SECTION 1: NEWS DISCOVERY AND RANKING
-# ==================================================
 
 st.header("1. Chemical Industry News Discovery")
 
@@ -113,14 +54,23 @@ if st.button("Collect and Rank Latest News", type="primary"):
 
         try:
             all_news = collect_news(max_results=10)
-            recent_news = filter_news(all_news)
-            ranked_news = rank_news(recent_news)
 
-            clear_generated_content()
+            recent_news = filter_news(all_news)
+
+            ranked_news = rank_news(recent_news)
 
             st.session_state["ranked_news"] = ranked_news
             st.session_state["total_collected"] = len(all_news)
             st.session_state["total_filtered"] = len(recent_news)
+
+            # Clear previous generated content
+            for key in [
+                "selected_news",
+                "verified_data",
+                "generated_article",
+                "generated_carousel"
+            ]:
+                st.session_state.pop(key, None)
 
             st.success("News collection and ranking completed.")
 
@@ -149,16 +99,17 @@ if ranked_news:
         len(ranked_news)
     )
 
-    st.subheader("Top Ranked News Articles")
+    st.subheader("Top 10 Ranked News Articles")
 
     for index, news in enumerate(ranked_news[:10], 1):
 
         with st.expander(
             f"{index}. {news.get('title', 'Untitled')} "
-            f"— Score: {get_score(news):.2f}"
+            f"— Score: {news.get('score', 0)}/100"
         ):
 
             st.write("**Publisher:**", news.get("source", "Unknown"))
+
             st.write("**Published:**", news.get("published", "Unknown"))
 
             st.write("**Score breakdown:**")
@@ -169,16 +120,10 @@ if ranked_news:
             for reason in news.get("selection_reasons", []):
                 st.write(f"- {reason}")
 
-            if news.get("eligibility_reason"):
-                st.write(
-                    "**Editorial eligibility:**",
-                    news["eligibility_reason"]
+            if news.get("link"):
+                st.markdown(
+                    f"[Read original article]({news['link']})"
                 )
-
-            url = get_news_url(news)
-
-            if url.startswith(("http://", "https://")):
-                st.markdown(f"[Read original article]({url})")
 
 else:
     st.info("Click the button above to collect and rank the latest news.")
@@ -187,152 +132,112 @@ else:
 st.divider()
 
 
-# ==================================================
 # SECTION 2: AUTOMATIC NEWS SELECTION
-# ==================================================
 
 st.header("2. Automatic News Selection")
 
 st.write(
-    "The agent evaluates eligible ranked stories, extracts information "
-    "from their original articles, and selects the strongest candidate "
-    "that passes article validation."
+    "The agent evaluates the ranked news and selects the highest-ranked "
+    "suitable story from the collected articles."
 )
 
 if ranked_news:
 
     if st.button("Select Best Story and Extract Facts", type="primary"):
 
-        clear_generated_content()
+        with st.spinner(
+            "Evaluating ranked stories and extracting facts..."
+        ):
 
-        eligible_candidates = [
-            news for news in ranked_news
-            if news.get("eligible_for_selection", False)
-        ]
+            for key in [
+                "selected_news",
+                "verified_data",
+                "generated_article",
+                "generated_carousel"
+            ]:
+                st.session_state.pop(key, None)
 
-        eligible_candidates.sort(
-            key=get_score,
-            reverse=True
-        )
+            # Only evaluate stories that passed editorial eligibility.
+            eligible_candidates = [
+                news for news in ranked_news
+                if news.get("eligible_for_selection") is True
+            ]
 
-        candidates_to_check = eligible_candidates[:5]
+            # Evaluate eligible stories in ranking order.
+            candidates = eligible_candidates[:10]
 
-        evaluations = []
-        valid_candidates = []
+            evaluation_results = []
 
-        if not candidates_to_check:
+            for candidate in candidates:
 
-            st.warning(
-                "No articles passed the editorial eligibility checks. "
-                "Collect fresh news or review the ranking filters."
-            )
+                title = candidate.get("title", "Untitled")
 
-        else:
+                try:
+                    result = verify_news(candidate)
 
-            with st.spinner(
-                f"Checking {len(candidates_to_check)} eligible articles "
-                "and extracting their facts..."
-            ):
+                    valid, message = validate_news(result)
 
-                for candidate in candidates_to_check:
-
-                    title = candidate.get("title", "Untitled")
-
-                    evaluation = {
+                    evaluation_results.append({
                         "title": title,
-                        "score": get_score(candidate),
+                        "score": candidate.get("score", 0),
+                        "status": "Passed" if valid else "Failed",
+                        "reason": message
+                    })
+
+                    if valid:
+                        st.session_state["selected_news"] = candidate
+                        st.session_state["verified_data"] = result
+                        break
+
+                except Exception as error:
+
+                    evaluation_results.append({
+                        "title": title,
+                        "score": candidate.get("score", 0),
                         "status": "Failed",
-                        "message": "",
-                        "news": candidate
-                    }
+                        "reason": str(error)
+                    })
 
-                    try:
-                        result = verify_news(candidate)
-                        valid, message = validate_news(result)
+            st.session_state["candidate_evaluations"] = evaluation_results
 
-                        evaluation["message"] = message
-
-                        if valid:
-
-                            evaluation["status"] = "Passed"
-
-                            valid_candidates.append({
-                                "news": candidate,
-                                "result": result
-                            })
-
-                        else:
-                            evaluation["status"] = "Failed"
-
-                    except Exception as error:
-
-                        evaluation["status"] = "Error"
-                        evaluation["message"] = str(error)
-
-                        print(
-                            f"Candidate processing failed: {title}: "
-                            f"{repr(error)}"
-                        )
-
-                    evaluations.append(evaluation)
-
-            st.session_state["candidate_evaluations"] = evaluations
-
-            if valid_candidates:
-
-                winner = max(
-                    valid_candidates,
-                    key=lambda item: get_score(item["news"])
-                )
-
-                st.session_state["selected_news"] = winner["news"]
-                st.session_state["verified_data"] = winner["result"]
-
-                st.success(
-                    "The agent selected the highest-scoring candidate "
-                    "among the articles that passed validation."
-                )
-
-            else:
-
-                st.error(
-                    "No eligible candidate passed article validation. "
-                    "Try collecting fresh news."
-                )
+            if "selected_news" not in st.session_state:
+                if not eligible_candidates:
+                    st.error(
+                        "No stories passed editorial eligibility. "
+                        "Please collect and rank news again."
+                    )
+                else:
+                    st.error(
+                        "No eligible candidate passed original article "
+                        "extraction and validation."
+                    )
 
 
 selected_news = st.session_state.get("selected_news")
-verified_data = st.session_state.get("verified_data")
 
-candidate_evaluations = st.session_state.get(
-    "candidate_evaluations", []
-)
+verified_data = st.session_state.get("verified_data")
 
 
 if selected_news and verified_data:
 
+    st.success("The agent has selected a suitable news story.")
+
     st.subheader("🏆 Selected Winning Story")
 
-    st.markdown(f"### {selected_news.get('title', 'Untitled')}")
+    st.markdown(
+        f"### {selected_news.get('title', 'Untitled')}"
+    )
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
 
     col1.metric(
         "Winning score",
-        f"{get_score(selected_news):.2f}"
+        selected_news.get("score", 0)
     )
 
     col2.metric(
         "Candidates evaluated",
-        len(candidate_evaluations)
-    )
-
-    col3.metric(
-        "Candidates passed",
-        sum(
-            1 for item in candidate_evaluations
-            if item["status"] == "Passed"
-        )
+        min(10, len(ranked_news))
     )
 
     st.write(
@@ -345,17 +250,16 @@ if selected_news and verified_data:
         selected_news.get("published", "Unknown")
     )
 
-    selected_url = get_news_url(selected_news)
-
-    if selected_url.startswith(("http://", "https://")):
-        st.markdown(f"[Read selected article]({selected_url})")
+    if selected_news.get("link"):
+        st.markdown(
+            f"[Read selected article]({selected_news['link']})"
+        )
 
     st.subheader("Why This Story Won")
 
     st.write(
-        "The agent compared the editorial ranking scores of the "
-        "eligible candidates that passed article extraction and "
-        "validation. This story had the highest score in that group."
+        "This story had the highest ranking score among the "
+        "candidates that also provided sufficient extractable facts."
     )
 
     for reason in selected_news.get("selection_reasons", []):
@@ -364,58 +268,52 @@ if selected_news and verified_data:
     st.write("**Winning score breakdown:**")
     st.write(selected_news.get("scores", {}))
 
-    st.subheader("Candidate Evaluation and Comparison")
+    st.subheader("Comparison With Other Ranked Stories")
 
-    for item in candidate_evaluations:
+    for competitor in ranked_news[:10]:
 
-        candidate = item["news"]
+        if competitor.get("link") == selected_news.get("link"):
+            continue
 
-        if get_news_url(candidate) == selected_url:
-            label = "🏆 SELECTED"
-        else:
-            label = item["status"].upper()
+        winner_score = float(selected_news.get("score", 0))
+        competitor_score = float(competitor.get("score", 0))
+
+        difference = winner_score - competitor_score
 
         with st.expander(
-            f"{label} | {item['title']} | Score: {item['score']:.2f}"
+            f"{competitor.get('title', 'Untitled')} "
+            f"— Score: {competitor.get('score', 0)}"
         ):
 
-            st.write("**Extraction result:**", item["status"])
-
             st.write(
-                "**Validation details:**",
-                item["message"] or "No additional details."
-            )
-
-            difference = get_score(selected_news) - item["score"]
-
-            st.write(
-                f"**Score difference from winner:** {difference:+.2f}"
+                f"**Score difference:** {difference:+.2f} points"
             )
 
             st.write("**Ranking reasons:**")
 
-            for reason in candidate.get("selection_reasons", []):
+            for reason in competitor.get("selection_reasons", []):
                 st.write(f"- {reason}")
 
     st.caption(
-        "The comparison covers the eligible candidates actually evaluated. "
-        "Candidates that failed article validation were not considered "
-        "for the final selection."
+        "The comparison uses the ranking scores and scoring reasons. "
+        "Candidates that could not provide sufficient article facts "
+        "were skipped."
     )
 
     st.divider()
 
-    # Extracted facts
+    # DISPLAY EXTRACTED FACTS
 
     st.subheader("Extracted Facts")
 
     st.write(
         "The following information was extracted from the selected "
-        "original article."
+        "news article."
     )
 
-    if verified_data.get("verification_status"):
-        st.info(verified_data["verification_status"])
+    st.info(
+        verified_data.get("verification_status", "")
+    )
 
     if verified_data.get("main_development"):
         st.write(
@@ -424,10 +322,16 @@ if selected_news and verified_data:
         )
 
     if verified_data.get("company"):
-        st.write("**Company:**", verified_data["company"])
+        st.write(
+            "**Company:**",
+            verified_data["company"]
+        )
 
     if verified_data.get("location"):
-        st.write("**Location:**", verified_data["location"])
+        st.write(
+            "**Location:**",
+            verified_data["location"]
+        )
 
     for index, fact in enumerate(
         get_verified_facts(verified_data), 1
@@ -440,25 +344,10 @@ if selected_news and verified_data:
 
         for figure in verified_data["important_figures"]:
 
-            if isinstance(figure, dict):
-                st.write(
-                    f"**{figure.get('value', '')}** — "
-                    f"{figure.get('description', '')}"
-                )
-            else:
-                st.write(f"- {figure}")
-
-    if verified_data.get("business_implications"):
-
-        st.subheader("Business Implications")
-
-        for item in verified_data["business_implications"]:
-            st.write(f"- {item}")
-
-    if verified_data.get("editorial_analysis"):
-
-        st.subheader("Editorial Analysis")
-        st.write(verified_data["editorial_analysis"])
+            st.write(
+                f"**{figure.get('value', '')}** — "
+                f"{figure.get('description', '')}"
+            )
 
     if verified_data.get("missing_information"):
 
@@ -470,7 +359,12 @@ if selected_news and verified_data:
             st.write(f"- {item}")
 
     st.subheader("Sources and References")
-    show_sources(get_sources(verified_data))
+
+    for source in get_sources(verified_data):
+
+        st.markdown(
+            f"- [{source['name']}]({source['url']})"
+        )
 
     st.caption(
         "Facts are extracted from the listed article. "
@@ -478,39 +372,18 @@ if selected_news and verified_data:
         "is recommended before publication."
     )
 
-elif candidate_evaluations:
-
-    st.subheader("Candidate Evaluation Results")
-
-    for item in candidate_evaluations:
-
-        with st.expander(
-            f"{item['status']} | {item['title']} "
-            f"| Score: {item['score']:.2f}"
-        ):
-
-            st.write("**Result:**", item["status"])
-            st.write("**Reason:**", item["message"])
-
-    st.warning(
-        "No candidate passed validation. Review the reasons above "
-        "to identify the article extraction or validation issue."
-    )
-
-elif ranked_news:
+else:
 
     st.info(
-        "Click 'Select Best Story and Extract Facts' to evaluate "
-        "eligible articles and select the winning story."
+        "Collect and rank news, then select the winning story "
+        "to see its extracted facts."
     )
 
 
 st.divider()
 
 
-# ==================================================
 # SECTION 3: LINKEDIN ARTICLE GENERATION
-# ==================================================
 
 st.header("3. Generate ChemStride LinkedIn Article")
 
@@ -526,6 +399,7 @@ if selected_news and verified_data:
         valid, message = validate_news(verified_data)
 
         if not valid:
+
             st.error(message)
 
         else:
@@ -535,25 +409,25 @@ if selected_news and verified_data:
             ):
 
                 try:
-
                     article = generate_article(
                         selected_news,
                         get_verified_facts(verified_data),
-                        use_ai=True,
-                        business_implications=verified_data.get(
-                            "business_implications", []
-                        ),
-                        editorial_analysis=verified_data.get(
-                            "editorial_analysis", ""
-                        )
+                        use_ai=True
                     )
 
                     st.session_state["generated_article"] = article
-                    st.session_state.pop("generated_carousel", None)
-                    st.session_state.pop("carousel_index", None)
+
+                    # A new article requires a fresh carousel
+                    st.session_state.pop(
+                        "generated_carousel",
+                        None
+                    )
 
                 except Exception as error:
-                    st.error(f"Article generation failed: {error}")
+
+                    st.error(
+                        f"Article generation failed: {error}"
+                    )
 
 
 article = st.session_state.get("generated_article")
@@ -562,28 +436,33 @@ article = st.session_state.get("generated_article")
 if article:
 
     st.subheader("Generated LinkedIn Article")
+
     st.markdown(article)
 
     st.subheader("Article References")
-    show_sources(get_sources(verified_data))
+
+    for source in get_sources(verified_data):
+
+        st.markdown(
+            f"- [{source['name']}]({source['url']})"
+        )
 
     st.info(
         "Review the article and check the facts before publishing."
     )
 
-elif not selected_news:
+else:
 
-    st.info(
-        "Select a winning story before generating the article."
-    )
+    if not selected_news:
+        st.info(
+            "Select a winning story before generating the article."
+        )
 
 
 st.divider()
 
 
-# ==================================================
 # SECTION 4: SIX-SLIDE LINKEDIN CAROUSEL
-# ==================================================
 
 st.header("4. Generate Six-Slide LinkedIn Carousel")
 
@@ -595,17 +474,14 @@ st.write(
 if article and selected_news and verified_data:
 
     st.write(
-        "The carousel uses the same extracted article information "
-        "and ChemStride's professional writing style."
+        "The carousel follows ChemStride's professional writing style "
+        "and uses the same source information as the article."
     )
 
-    if st.button(
-        "Generate 6-Slide LinkedIn Carousel",
-        type="primary"
-    ):
+    if st.button("Generate 6-Slide LinkedIn Carousel", type="primary"):
 
         with st.spinner(
-            "Creating six carousel slides and preparing the PDF..."
+            "Creating six carousel slides and preparing PDF..."
         ):
 
             try:
@@ -624,317 +500,207 @@ if article and selected_news and verified_data:
                 )
 
             except Exception as error:
-                st.error(f"Carousel generation failed: {error}")
+
+                st.error(
+                    f"Carousel generation failed: {error}"
+                )
 
 
 carousel = st.session_state.get("generated_carousel")
 
 
-# ==================================================
-# SQUARE CAROUSEL PREVIEW
-# ==================================================
-
 if carousel:
 
     st.subheader("Carousel Preview")
-
-    st.caption(
-        "Preview each square slide individually. "
-        "The downloaded PDF contains the same six slides."
-    )
+    st.success(f"Selected theme: {carousel.get('theme', 'Generated theme')}")
 
     slides = carousel.get("slides", [])
+    pdf_bytes = carousel.get("pdf")
 
-    if slides:
+    if slides and pdf_bytes:
 
-        current_index = st.session_state.get("carousel_index", 0)
-
-        current_index = max(
-            0,
-            min(current_index, len(slides) - 1)
+        st.caption(
+            "Previewing the actual PDF page as an image. "
+            "The downloaded PDF contains the same slide design."
         )
 
-        st.session_state["carousel_index"] = current_index
+        if fitz is None:
+            st.error(
+                "Slide preview needs PyMuPDF. Install it with "
+                "`pip install pymupdf`, add `pymupdf` to requirements.txt, "
+                "and restart the app. You can still download the PDF below."
+            )
+        else:
+            # Keep the selected slide in Streamlit session state.
+            current_index = st.session_state.get("carousel_index", 0)
+            current_index = max(0, min(current_index, len(slides) - 1))
+            st.session_state["carousel_index"] = current_index
 
-        slide = slides[current_index]
+            previous_col, counter_col, next_col = st.columns([1, 1, 1])
 
-        previous_col, counter_col, next_col = st.columns([1, 2, 1])
+            with previous_col:
+                if st.button(
+                    "← Previous",
+                    key="carousel_previous",
+                    disabled=current_index == 0,
+                    use_container_width=True,
+                ):
+                    st.session_state["carousel_index"] = current_index - 1
+                    st.rerun()
 
-        with previous_col:
+            with counter_col:
+                st.markdown(
+                    f"<div style='text-align:center; padding:8px 0; "
+                    f"font-weight:800; color:#E21B23;'>"
+                    f"SLIDE {current_index + 1:02d} / {len(slides):02d}</div>",
+                    unsafe_allow_html=True,
+                )
 
-            if st.button(
-                "← Previous",
-                key="carousel_previous",
-                disabled=current_index == 0,
-                use_container_width=True
-            ):
+            with next_col:
+                if st.button(
+                    "Next →",
+                    key="carousel_next",
+                    disabled=current_index >= len(slides) - 1,
+                    use_container_width=True,
+                ):
+                    st.session_state["carousel_index"] = current_index + 1
+                    st.rerun()
 
-                st.session_state["carousel_index"] = current_index - 1
-                st.rerun()
+            # Fullscreen-compatible keyboard navigation.
+            components.html(
+                """
+                <script>
+                (function () {
+                    const parentWindow = window.parent;
+                    const parentDocument = parentWindow.document;
 
-        with counter_col:
+                    // Attach once to the parent document so the handler remains
+                    // active when Streamlit opens its image fullscreen viewer.
+                    if (parentWindow.__chemstrideCarouselKeysAttached) return;
+                    parentWindow.__chemstrideCarouselKeysAttached = true;
 
-            st.markdown(
-                f"""
-                <div style="
-                    text-align:center;
-                    padding-top:9px;
-                    font-weight:700;
-                    color:#238C8C;
-                ">
-                    SLIDE {current_index + 1} / {len(slides)}
-                </div>
+                    parentDocument.addEventListener("keydown", function (event) {
+                        if (event.altKey || event.ctrlKey || event.metaKey) return;
+
+                        const active = parentDocument.activeElement;
+                        const tag = active ? active.tagName.toLowerCase() : "";
+                        const typing = tag === "input" || tag === "textarea" ||
+                            (active && active.isContentEditable);
+
+                        if (typing) return;
+
+                        let targetText = null;
+
+                        if (event.key === "ArrowLeft") {
+                            targetText = "← Previous";
+                        }
+
+                        if (event.key === "ArrowRight") {
+                            targetText = "Next →";
+                        }
+
+                        if (!targetText) return;
+
+                        const buttons = Array.from(
+                            parentDocument.querySelectorAll("button")
+                        );
+
+                        const target = buttons.find(button =>
+                            button.innerText.trim() === targetText
+                        );
+
+                        if (target && !target.disabled) {
+                            event.preventDefault();
+                            event.stopPropagation();
+
+                            if (
+                                typeof event.stopImmediatePropagation === "function"
+                            ) {
+                                event.stopImmediatePropagation();
+                            }
+
+                            target.click();
+                        }
+                    }, true);
+                })();
+                </script>
                 """,
-                unsafe_allow_html=True
+                height=0,
+                scrolling=False,
             )
 
-        with next_col:
+            try:
+                # Render the actual PDF page as a centered, readable preview.
+                with fitz.open(
+                    stream=pdf_bytes,
+                    filetype="pdf"
+                ) as pdf_document:
 
-            if st.button(
-                "Next →",
-                key="carousel_next",
-                disabled=current_index == len(slides) - 1,
-                use_container_width=True
-            ):
+                    if len(pdf_document) != len(slides):
+                        st.warning(
+                            f"The PDF contains {len(pdf_document)} pages, "
+                            f"while the slide data contains {len(slides)} slides."
+                        )
 
-                st.session_state["carousel_index"] = current_index + 1
-                st.rerun()
+                    page_index = min(
+                        current_index,
+                        len(pdf_document) - 1
+                    )
 
-        # --------------------------------------------------
-        # Prepare square slide HTML
-        # --------------------------------------------------
+                    page = pdf_document.load_page(page_index)
 
-        is_cover = current_index == 0
+                    pixmap = page.get_pixmap(
+                        matrix=fitz.Matrix(1.5, 1.5),
+                        alpha=False,
+                    )
 
-        background = "#123447" if is_cover else "#F6F5EF"
-        heading_color = "#FFFFFF" if is_cover else "#123447"
-        muted_color = "#D8E8E9" if is_cover else "#61747B"
-        accent_color = "#D6A84F" if is_cover else "#238C8C"
+                    slide_png = pixmap.tobytes("png")
 
-        heading = safe_html(slide.get("heading", ""))
-        subheading = safe_html(slide.get("subheading", ""))
-        footer = safe_html(slide.get("footer", "CHEMSTRIDE"))
+                left_space, preview_col, right_space = st.columns([1, 2, 1])
 
-        bullet_html = ""
+                with preview_col:
+                    st.image(
+                        slide_png,
+                        width=720,
+                        caption=f"Slide {current_index + 1} of {len(slides)}",
+                    )
 
-        for bullet in slide.get("bullets", []):
-
-            if not str(bullet).strip():
-                continue
-
-            bullet_html += f"""
-            <div style="
-                display:flex;
-                align-items:flex-start;
-                gap:12px;
-                background:#FFFFFF;
-                border-radius:10px;
-                padding:12px 14px;
-                margin:8px 0;
-                color:#203640;
-                font-size:14px;
-                line-height:1.4;
-                border-left:4px solid #238C8C;
-            ">
-                <span style="color:#238C8C;font-weight:bold;">●</span>
-                <span>{safe_html(bullet)}</span>
-            </div>
-            """
-
-        cover_visual = ""
-
-        if is_cover:
-
-            cover_visual = """
-            <div style="
-                background:#1D4B60;
-                border-radius:14px;
-                padding:20px;
-                margin-top:auto;
-                color:#FFFFFF;
-            ">
-                <div style="
-                    width:42px;
-                    height:4px;
-                    background:#D6A84F;
-                    border-radius:4px;
-                    margin-bottom:18px;
-                "></div>
-
-                <div style="
-                    font-size:18px;
-                    font-weight:700;
-                    margin-bottom:10px;
-                ">
-                    CHEMICAL INDUSTRY
-                </div>
-
-                <div style="color:#D8E8E9;font-size:13px;">
-                    News · Analysis · Business Perspective
-                </div>
-            </div>
-            """
-
-        preview_html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            * {{
-                box-sizing: border-box;
-            }}
-
-            body {{
-                margin: 0;
-                padding: 0;
-                font-family: Arial, Helvetica, sans-serif;
-                background: transparent;
-            }}
-
-            .slide {{
-                width: 100%;
-                max-width: 720px;
-                aspect-ratio: 1 / 1;
-                margin: 0 auto;
-                padding: 5.5%;
-                background: {background};
-                border: 1px solid #DCE4E2;
-                border-radius: 16px;
-                display: flex;
-                flex-direction: column;
-                overflow: hidden;
-            }}
-
-            .top {{
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                color: {heading_color};
-                font-size: 12px;
-                font-weight: 700;
-                letter-spacing: 2px;
-            }}
-
-            .accent {{
-                width: 48px;
-                height: 4px;
-                background: {accent_color};
-                border-radius: 4px;
-                margin-top: 13px;
-                margin-bottom: 20px;
-            }}
-
-            .section {{
-                color: {accent_color};
-                font-size: 11px;
-                font-weight: 700;
-                letter-spacing: 1.5px;
-                margin-bottom: 15px;
-            }}
-
-            .heading {{
-                color: {heading_color};
-                font-size: clamp(22px, 4vw, 34px);
-                line-height: 1.13;
-                font-weight: 750;
-                margin-bottom: 15px;
-                overflow-wrap: anywhere;
-            }}
-
-            .subheading {{
-                color: {muted_color};
-                font-size: 15px;
-                line-height: 1.45;
-                margin-bottom: 15px;
-                overflow-wrap: anywhere;
-            }}
-
-            .content {{
-                flex: 1;
-                min-height: 0;
-                overflow: hidden;
-            }}
-
-            .bottom {{
-                border-top: 1px solid {'#416273' if is_cover else '#DCE4E2'};
-                margin-top: 12px;
-                padding-top: 10px;
-                display: flex;
-                justify-content: space-between;
-                color: {muted_color};
-                font-size: 10px;
-                font-weight: 700;
-                letter-spacing: 1px;
-            }}
-        </style>
-        </head>
-
-        <body>
-            <div class="slide">
-
-                <div class="top">
-                    <span>CHEMSTRIDE</span>
-                    <span style="font-weight:400;letter-spacing:1px;">
-                        INDUSTRY INSIGHTS
-                    </span>
-                </div>
-
-                <div class="accent"></div>
-
-                <div class="section">{footer}</div>
-
-                <div class="heading">{heading}</div>
-
-                <div class="subheading">{subheading}</div>
-
-                <div class="content">
-                    {bullet_html}
-                    {cover_visual}
-                </div>
-
-                <div class="bottom">
-                    <span>CHEMSTRIDE</span>
-                    <span>{current_index + 1:02d} / 06</span>
-                </div>
-
-            </div>
-        </body>
-        </html>
-        """
-
-        # Render HTML in a component iframe instead of Markdown.
-        components.html(
-            preview_html,
-            height=760,
-            scrolling=False
-        )
+            except Exception as error:
+                st.error(f"Could not render the slide preview: {error}")
+                st.caption("The PDF download is still available below.")
 
         st.divider()
 
-        pdf_bytes = carousel.get("pdf")
-
-        if pdf_bytes:
-
-            st.download_button(
-                label="Download LinkedIn Carousel (PDF)",
-                data=pdf_bytes,
-                file_name=carousel.get(
-                    "filename",
-                    "chemstride_linkedin_carousel.pdf"
-                ),
-                mime="application/pdf",
-                type="primary",
-                use_container_width=True
-            )
+        st.download_button(
+            label="Download LinkedIn Carousel (PDF)",
+            data=pdf_bytes,
+            file_name=carousel.get(
+                "filename",
+                "chemstride_linkedin_carousel.pdf",
+            ),
+            mime="application/pdf",
+            type="primary",
+            use_container_width=True,
+        )
 
         st.subheader("Carousel References")
-        show_sources(get_sources(verified_data))
+
+        for source in get_sources(verified_data):
+            source_name = source.get("name", "Original source")
+            source_url = source.get("url", "")
+
+            if source_url:
+                st.markdown(f"- [{source_name}]({source_url})")
+            else:
+                st.write(f"- {source_name}")
 
         st.info(
-            "Review the six slides and their source references "
-            "before publishing."
+            "The carousel uses the extracted facts from the selected article. "
+            "Review all six slides and references before publishing."
         )
+
+    else:
+        st.error("The generated carousel or PDF is missing.")
 
 else:
 
@@ -949,10 +715,6 @@ else:
             "Generate the LinkedIn article first to enable carousel generation."
         )
 
-
-# ==================================================
-# FOOTER
-# ==================================================
 
 st.divider()
 

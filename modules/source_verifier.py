@@ -147,6 +147,116 @@ def unique_paragraphs(paragraphs):
 
 
 # --------------------------------------------------
+# 2A. SOURCE EVIDENCE MATCHING
+# --------------------------------------------------
+
+def normalize_evidence_text(text):
+    """Normalize text for exact-phrase matching against the fetched article."""
+    text = clean_article_text(text).lower()
+    text = re.sub(r"[^a-z0-9%₹$.,:/+-]+", " ", text)
+    return re.sub(r"\\s+", " ", text).strip()
+
+
+def match_evidence_quote(article_text, evidence):
+    """
+    Return True only when a sufficiently substantial evidence quote appears
+    in the fetched article text. This is traceability, not independent fact-checking.
+    """
+    quote = normalize_evidence_text(evidence)
+    source = normalize_evidence_text(article_text)
+    return len(quote) >= 18 and quote in source
+
+
+def build_evidence_records(items, evidence_items, article_text, category):
+    """Pair extracted claims with evidence quotations and record match status."""
+    records = []
+    evidence_by_claim = {}
+
+    for evidence_item in evidence_items or []:
+        if not isinstance(evidence_item, dict):
+            continue
+        claim = (
+            evidence_item.get("fact")
+            or evidence_item.get("implication")
+            or evidence_item.get("text")
+            or ""
+        )
+        evidence_by_claim[clean_article_text(claim).casefold()] = (
+            evidence_item.get("evidence", "")
+        )
+
+    for item in items or []:
+        if isinstance(item, dict):
+            claim = item.get("text") or item.get("description") or item.get("value") or ""
+            evidence = item.get("evidence", "")
+        else:
+            claim = str(item)
+            evidence = ""
+
+        claim = clean_article_text(claim)
+        if not claim:
+            continue
+
+        if not evidence:
+            evidence = evidence_by_claim.get(claim.casefold(), "")
+
+        matched = match_evidence_quote(article_text, evidence)
+        records.append({
+            "text": claim,
+            "evidence": clean_article_text(evidence),
+            "evidence_matches_source": matched,
+            "evidence_status": (
+                "Source quotation matched"
+                if matched else "No matching source quotation"
+            ),
+            "category": category
+        })
+
+    return records
+
+
+def attach_evidence_status(extracted_data, article_text):
+    """Attach evidence traceability records without changing legacy fact fields."""
+    facts = build_evidence_records(
+        extracted_data.get("facts", []),
+        extracted_data.get("fact_evidence", []),
+        article_text,
+        "reported_fact"
+    )
+    figures = build_evidence_records(
+        extracted_data.get("important_figures", []),
+        [],
+        article_text,
+        "reported_figure"
+    )
+    implications = build_evidence_records(
+        extracted_data.get("business_implications", []),
+        extracted_data.get("implication_evidence", []),
+        article_text,
+        "reported_implication"
+    )
+
+    all_records = facts + figures + implications
+    extracted_data["fact_evidence_records"] = facts
+    extracted_data["figure_evidence_records"] = figures
+    extracted_data["implication_evidence_records"] = implications
+    extracted_data["evidence_summary"] = {
+        "total_claims": len(all_records),
+        "claims_with_matching_quotes": sum(
+            1 for item in all_records if item["evidence_matches_source"]
+        ),
+        "claims_without_matching_quotes": sum(
+            1 for item in all_records if not item["evidence_matches_source"]
+        ),
+        "note": (
+            "Quote matching establishes traceability to the fetched article text; "
+            "it does not independently establish that the publisher's claims are true."
+        )
+    }
+    return extracted_data
+
+
+# --------------------------------------------------
 # 3. URL HELPERS
 # --------------------------------------------------
 
@@ -480,7 +590,13 @@ def extract_facts_with_gemini(news, article_text):
     client = genai.Client(
         api_key=api_key,
         http_options=types.HttpOptions(
-            retry_options=types.HttpRetryOptions(attempts=1)
+            retry_options=types.HttpRetryOptions(
+                attempts=3,
+                initial_delay=2,
+                max_delay=8,
+                exp_base=2,
+                jitter=0.2
+            )
         )
     )
 
@@ -510,6 +626,13 @@ STRICT FACTUAL RULES:
 8. Do not claim independent verification.
 9. Avoid repeating the same fact.
 10. Identify if the article does not match the supplied headline.
+11. For each fact, provide a matching exact quotation in "fact_evidence".
+12. For each important figure, include an exact supporting "evidence" quotation.
+13. For each business implication, provide a matching exact quotation in
+    "implication_evidence". Put interpretations in editorial_analysis.
+14. Never invent or paraphrase evidence quotations. Leave evidence empty if absent.
+15. Include all material names, locations, dates, project stages, figures,
+    capacity details and stated objectives present in the article.
 
 Return valid JSON only:
 
@@ -521,14 +644,27 @@ Return valid JSON only:
     "facts": [
         "A specific fact supported by the article"
     ],
+    "fact_evidence": [
+        {{
+            "fact": "Matching fact above",
+            "evidence": "Exact quotation copied from the article"
+        }}
+    ],
     "important_figures": [
         {{
             "value": "Figure exactly as reported",
-            "description": "What the figure represents"
+            "description": "What the figure represents",
+            "evidence": "Exact quotation copied from the article"
         }}
     ],
     "business_implications": [
         "An implication supported by the article"
+    ],
+    "implication_evidence": [
+        {{
+            "implication": "Matching implication above",
+            "evidence": "Exact quotation copied from the article"
+        }}
     ],
     "editorial_analysis": [
         "Clearly labelled interpretation, not a confirmed fact"
@@ -586,6 +722,17 @@ in editorial_analysis.
         if isinstance(item, dict)
     ]
 
+    for evidence_field in ["fact_evidence", "implication_evidence"]:
+        if not isinstance(result.get(evidence_field), list):
+            result[evidence_field] = []
+        result[evidence_field] = [
+            item for item in result[evidence_field]
+            if isinstance(item, dict)
+        ]
+
+    for figure in result["important_figures"]:
+        figure.setdefault("evidence", "")
+
     for field in [
         "business_implications",
         "editorial_analysis",
@@ -629,6 +776,11 @@ def verify_news(news):
             article_text
         )
 
+        extracted_data = attach_evidence_status(
+            extracted_data,
+            article_text
+        )
+
         publisher = get_publisher(news, final_url)
 
         source = {
@@ -663,6 +815,19 @@ def verify_news(news):
             "extraction_notes": extracted_data.get(
                 "extraction_notes", ""
             ),
+            "fact_evidence_records": extracted_data.get(
+                "fact_evidence_records", []
+            ),
+            "figure_evidence_records": extracted_data.get(
+                "figure_evidence_records", []
+            ),
+            "implication_evidence_records": extracted_data.get(
+                "implication_evidence_records", []
+            ),
+            "evidence_summary": extracted_data.get(
+                "evidence_summary", {}
+            ),
+            "article_text_length": len(article_text),
             "article_matches_headline": extracted_data.get(
                 "article_matches_headline", False
             ),
@@ -698,6 +863,16 @@ def get_verified_facts(result):
 
 def get_sources(result):
     return result.get("sources", [])
+
+
+def get_evidence_records(result):
+    """Return source-quotation traceability records for display or auditing."""
+    return {
+        "facts": result.get("fact_evidence_records", []),
+        "figures": result.get("figure_evidence_records", []),
+        "business_implications": result.get("implication_evidence_records", []),
+        "summary": result.get("evidence_summary", {})
+    }
 
 
 # --------------------------------------------------
@@ -748,8 +923,8 @@ def validate_news(result):
 
     return (
         True,
-        "Article content retrieved and factual information extracted. "
-        "Independent verification is still required."
+        "Publisher article retrieved; extracted claims include source-quotation "
+        "traceability checks. Quote matching is not independent fact verification."
     )
 
 
